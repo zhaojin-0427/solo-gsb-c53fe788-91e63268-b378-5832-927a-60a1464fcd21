@@ -10,8 +10,9 @@ plus a non-negative offset.  The engine
 * builds per-channel piecewise-linear fade segments, each fade starting
   from the *unrounded* value left by the previous fade (a later item can
   interrupt an earlier fade),
-* evaluates the channel values at any non-negative time exactly
-  (``fractions.Fraction``); display values round half up.
+* evaluates the channel values at any non-negative time, including
+  fractional milliseconds (``fractions.Fraction``), exactly; display
+  values round half up.
 """
 
 from __future__ import annotations
@@ -216,11 +217,17 @@ def _value_at(segs: List[Segment], t: int, fallback: Fraction) -> Fraction:
     return fallback
 
 
+# An evaluation instant.  Item starts/durations stay integer milliseconds,
+# but the playhead may sit at any non-negative fractional millisecond; an
+# int is accepted everywhere a Time is expected (Fraction arithmetic mixes).
+Time = Fraction
+
+
 # --------------------------------------------------------------------------
 # Evaluation at an arbitrary absolute time
 # --------------------------------------------------------------------------
 
-def eval_lane(segs: List[Segment], t: int) -> Tuple[Fraction, Optional[int]]:
+def eval_lane(segs: List[Segment], t: Time) -> Tuple[Fraction, Optional[int]]:
     """Return (exact value, item id responsible for the value) at time t.
 
     Segments are start-ordered; an interrupted segment can still span t,
@@ -244,7 +251,7 @@ def eval_lane(segs: List[Segment], t: int) -> Tuple[Fraction, Optional[int]]:
     return value, active
 
 
-def evaluate(view: ResolvedView, t: int) -> Dict[str, dict]:
+def evaluate(view: ResolvedView, t: Time) -> Dict[str, dict]:
     if t < 0:
         raise EngineError("时间不能为负")
     out: Dict[str, dict] = {}

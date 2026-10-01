@@ -181,6 +181,64 @@ class TestFades(unittest.TestCase):
         self.assertEqual(evaluate(view, 50)["L1|2"]["value"], 0)
 
 
+class TestFractionalTimes(unittest.TestCase):
+    def test_decimal_time_linear(self):
+        # 0 -> 3 over 10 ms, evaluated at a fractional millisecond
+        view = resolve([abs_item(1, target=3, duration=10, ms=0)])
+        at = evaluate(view, Fraction(3, 2))["A|1"]  # t = 1.5
+        self.assertEqual(at["raw"], "9/20")          # 3 * 1.5/10
+        self.assertEqual(at["value"], 0)
+        at_frac = evaluate(view, Fraction(5, 3))["A|1"]
+        self.assertEqual(at_frac["raw"], "1/2")
+        self.assertEqual(at_frac["value"], 1)          # 0.5 rounds up
+        # flooring the same instant would wrongly yield 3/10
+        floored = evaluate(view, 1)["A|1"]
+        self.assertEqual(floored["raw"], "3/10")
+        self.assertNotEqual(floored["raw"], at["raw"])
+
+    def test_half_up_at_fractional_instant(self):
+        # the half-up boundary at the *value* level must be reachable
+        view = resolve([abs_item(1, target=100, duration=1000, ms=0)])
+        at = evaluate(view, Fraction(5))["A|1"]           # value 0.5
+        self.assertEqual(at["raw"], "1/2")
+        self.assertEqual(at["value"], 1)                     # exact .5 -> up
+        before = evaluate(view, Fraction(4495, 100))["A|1"]  # 44.95ms -> 4.495
+        self.assertEqual(before["raw"], "899/200")
+        self.assertEqual(before["value"], 4)
+        after = evaluate(view, Fraction(4505, 100))["A|1"]   # 45.05ms -> 4.505
+        self.assertEqual(after["value"], 5)
+
+    def test_integer_times_still_exact(self):
+        view = resolve([abs_item(1, target=100, duration=1000, ms=0)])
+        for t in (0, 250, 500, 1000, 2000):
+            ch = evaluate(view, t)["A|1"]
+            expected = Fraction(100 * min(t, 1000), 1000)
+            self.assertEqual(Fraction(ch["raw"]), expected)
+
+    def test_interrupt_continues_at_fractional_boundary(self):
+        # 0..3 over 10 ms, cut at t=5 (value exactly 3/2); the next fade
+        # 3/2 -> 103 over 100 ms, probed at 5.5 ms
+        view = resolve([
+            abs_item(1, target=3, duration=10, ms=0),
+            abs_item(2, target=103, duration=100, ms=5),
+        ])
+        at = evaluate(view, Fraction(11, 2))["A|1"]      # t = 5.5
+        # 3/2 + (103 - 3/2) * 0.5/100 = 3/2 + 203/400 = 803/400
+        self.assertEqual(at["raw"], "803/400")
+        self.assertEqual(at["active_item_id"], 2)
+
+    def test_instant_snap_at_fractional_time_below(self):
+        view = resolve([abs_item(1, target=200, duration=0, ms=5)])
+        self.assertEqual(evaluate(view, Fraction(99, 20))["A|1"]["value"], 0)  # 4.95
+        self.assertEqual(evaluate(view, Fraction(5))["A|1"]["value"], 200)       # 5
+        self.assertEqual(evaluate(view, Fraction(501, 100))["A|1"]["value"], 200)
+
+    def test_negative_fraction_rejected(self):
+        view = resolve([abs_item(1)])
+        with self.assertRaisesRegex(EngineError, "时间不能为负"):
+            evaluate(view, Fraction(-1, 2))
+
+
 class TestReferrerChain(unittest.TestCase):
     def test_closure(self):
         items = [

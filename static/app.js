@@ -1,6 +1,7 @@
 /* 灯光渐变时间轴 — 原生 JS 前端
- * 播放头只是一个时间值；所有读数始终来自后端 /eval 精确求值，
- * 因此拖动 / 跳转后的读数与直接求值完全一致。
+ * 播放头只是一个时间值（任意非负小数毫秒，全程不做取整）；所有读数
+ * 始终来自后端 /eval 精确求值，因此拖动 / 跳转 / 暂停后的读数与直接
+ * 对同一时刻求值完全一致。
  */
 "use strict";
 
@@ -51,9 +52,18 @@ const svgEl = (tag, attrs = {}) => {
 };
 
 function fmtTime(ms) {
-  ms = Math.max(0, Math.round(ms));
-  if (ms < 1000) return `${ms} ms`;
-  return `${(ms / 1000).toFixed(2)} s`;
+  ms = Math.max(0, ms);
+  if (ms < 1000) {
+    // keep up to 3 fractional digits so a decimal playhead is not hidden
+    const txt = ms.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
+    return `${txt} ms`;
+  }
+  return `${(ms / 1000).toFixed(3)} s`;
+}
+
+function round6(x) {
+  // strip binary-float noise beyond microseconds without truncating
+  return Math.round(x * 1e6) / 1e6;
 }
 
 function toast(msg) {
@@ -326,7 +336,7 @@ function setPlaying(on) {
       if (state.lastFrameTs == null) state.lastFrameTs = ts;
       const dt = ts - state.lastFrameTs;
       state.lastFrameTs = ts;
-      state.time += dt; // wall-clock ms == timeline ms
+      state.time += dt; // wall-clock ms == timeline ms (fractional kept)
       updateClockAndHead();
       requestEval(false);
       if (state.time > state.timeMax) {
@@ -338,6 +348,9 @@ function setPlaying(on) {
     state.rafId = requestAnimationFrame(tick);
   } else {
     cancelAnimationFrame(state.rafId);
+    // settle on the exact current instant: throttle may have skipped the
+    // last frame, so guarantee the readout matches direct eval at this time
+    requestEval(true);
   }
 }
 
@@ -349,7 +362,9 @@ function seekTo(t) {
 
 function updateClockAndHead() {
   $("#clock").textContent = fmtTime(state.time);
-  $("#jumpInput").value = Math.floor(state.time);
+  // show the exact playhead position (trimmed to 6 fractional digits just
+  // to avoid float noise like 1.5000000000000002); seeking never floors
+  $("#jumpInput").value = String(round6(state.time));
   const svg = document.querySelector("svg.tl");
   if (!svg) return;
   const x = state.labelW + state.headPad +
@@ -366,17 +381,29 @@ function updateClockAndHead() {
 }
 
 async function requestEval(immediate) {
-  const tq = Math.floor(state.time);
-  // identical integer time -> the result would be the same
-  if (!immediate && state.lastEvalTime === tq && state.readouts) return;
+  // the playhead is an arbitrary non-negative (possibly fractional) ms
+  // value; send it verbatim — no flooring anywhere in the chain
+  const tq = round6(state.time);
+  // identical time -> the result would be the same
+  if (state.lastEvalTime === tq && state.readouts) return;
   // one in-flight request at a time; remember to re-run afterwards
   if (state.evalInflight) {
     state.evalQueued = true;
     return;
   }
-  // during playback, cap request rate to ~12/s; seeks are always immediate
+  // during playback, cap request rate to ~12/s; seeks / pause are always
+  // immediate.  A skipped frame schedules one trailing run so the readout
+  // eventually settles on the exact current instant.
   const now = performance.now();
-  if (!immediate && now - (state._lastEvalKick || -100) < 80) return;
+  if (!immediate && now - (state._lastEvalKick || -100) < 80) {
+    if (state._evalTrailTimer == null) {
+      state._evalTrailTimer = setTimeout(() => {
+        state._evalTrailTimer = null;
+        requestEval(true);
+      }, 80);
+    }
+    return;
+  }
   state._lastEvalKick = now;
 
   state.evalInflight = true;
@@ -414,15 +441,15 @@ function renderReadouts() {
     let state2 = "idle";
     if (activeItem) {
       const inFade = activeItem.duration > 0 &&
-        state.readouts.time_ms >= activeItem.actual_start &&
-        state.readouts.time_ms < activeItem.actual_end;
+        state.time >= activeItem.actual_start &&
+        state.time < activeItem.actual_end;
       state2 = inFade ? "fading" : "held";
     }
     const interrupter = activeItem && activeItem.interrupted_by != null
       ? itemById(activeItem.interrupted_by) : null;
     const interrupted = !!interrupter &&
-      state.readouts.time_ms < interrupter.actual_start &&
-      state.readouts.time_ms >= activeItem.actual_start;
+      state.time < interrupter.actual_start &&
+      state.time >= activeItem.actual_start;
     const card = el("div", { class: `readout ${state2}${interrupted ? " interrupt" : ""}` },
       el("div", { class: "fk" }, `${lane.fixture} · CH${lane.channel}`),
       el("div", { class: "val" }, String(c.value)),
@@ -707,9 +734,9 @@ async function init() {
 
 function doJump() {
   const t = Number($("#jumpInput").value);
-  if (!Number.isFinite(t) || t < 0) { toast("请输入非负整数毫秒"); return; }
+  if (!Number.isFinite(t) || t < 0) { toast("请输入非负毫秒（可为小数）"); return; }
   setPlaying(false);
-  seekTo(Math.floor(t));
+  seekTo(t);
 }
 
 init().catch((e) => toast(e.message));

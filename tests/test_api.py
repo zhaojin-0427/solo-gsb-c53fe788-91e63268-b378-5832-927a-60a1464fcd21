@@ -118,6 +118,48 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(ch2["raw"], "3/2")
         self.assertEqual(ch2["value"], 2)
 
+    def test_eval_decimal_time_end_to_end(self):
+        self.client.post(f"{self.base}/items",
+                        json=abs_body(target=3, duration=10))
+        # t=1.5: 3 * 1.5/10 = 9/20, value 0; flooring to 1 would give 3/10
+        r = self.client.get(f"{self.base}/eval?t=1.5")
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertEqual(body["time_ms"], 1.5)
+        ch = body["channels"][0]
+        self.assertEqual(ch["raw"], "9/20")
+        self.assertEqual(ch["value"], 0)
+        # t=5 reaches the half-up point: 3/2 -> displayed 2
+        r5 = self.client.get(f"{self.base}/eval?t=5").json()
+        self.assertEqual(r5["time_ms"], 5)  # integral echo stays a JSON int
+        self.assertEqual(r5["channels"][0]["raw"], "3/2")
+        self.assertEqual(r5["channels"][0]["value"], 2)
+
+    def test_eval_fraction_literal(self):
+        self.client.post(f"{self.base}/items",
+                        json=abs_body(target=3, duration=10))
+        r = self.client.get(f"{self.base}/eval", params={"t": "5/3"})
+        self.assertEqual(r.status_code, 200, r.text)
+        ch = r.json()["channels"][0]
+        self.assertEqual(ch["raw"], "1/2")
+        self.assertEqual(ch["value"], 1)  # 0.5 rounds half up
+
+    def test_eval_decimal_matches_integer_regression(self):
+        self.client.post(f"{self.base}/items",
+                         json=abs_body(target=100, duration=1000))
+        for t, expected in ((0, 0), (250, 25), (500, 50),
+                              (1000, 100), (2000, 100)):
+            r = self.client.get(f"{self.base}/eval", params={"t": t})
+            self.assertEqual(r.json()["time_ms"], t)
+            self.assertEqual(r.json()["channels"][0]["value"], expected)
+
+    def test_eval_rejects_bad_times(self):
+        for bad in ("-1.5", "abc", "", "-0.1"):
+            r = self.client.get(f"{self.base}/eval", params={"t": bad})
+            self.assertEqual(r.status_code, 422, bad)
+        # missing parameter is also a validation error
+        self.assertEqual(self.client.get(f"{self.base}/eval").status_code, 422)
+
     def test_field_validation(self):
         r = self.client.post(f"{self.base}/items",
                              json=abs_body(target=256))

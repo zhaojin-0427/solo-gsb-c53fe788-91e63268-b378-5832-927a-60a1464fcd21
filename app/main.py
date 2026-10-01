@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import os
 from contextlib import asynccontextmanager
-from typing import Optional
+from fractions import Fraction
+from typing import Optional, Union
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
@@ -181,22 +182,49 @@ def _validate_and_payload(conn, project_id: int, focus_id: Optional[int]):
 # --------------------------------------------------------------------------
 
 class EvalResponse(BaseModel):
-    time_ms: int
+    # int when t is integral, float otherwise; never lossy because the
+    # exact value was already consumed by the Fraction engine before
+    # serialization.
+    time_ms: Union[int, float]
     channels: list
 
 
+def parse_time(t: str) -> Fraction:
+    """Parse a query time into an exact Fraction.
+
+    Accepts non-negative decimal text ("1.5", "1_000", "1e-3") and
+    rational text ("5/3") exactly as fractions.Fraction does.  Raises
+    HTTP 422 on malformed, infinite/NaN or negative input.
+    """
+    raw = t.strip()
+    if not raw:
+        raise HTTPException(status_code=422, detail="时间参数 t 不能为空")
+    try:
+        value = Fraction(raw)
+    except (ValueError, ZeroDivisionError):
+        raise HTTPException(
+            status_code=422, detail=f"时间参数 t={t!r} 不是合法的非负小数时刻"
+        )
+    if value < 0:
+        raise HTTPException(status_code=422, detail="时间不能为负")
+    return value
+
+
 @app.get("/api/projects/{project_id}/eval", response_model=EvalResponse)
-def api_eval(project_id: int, t: int = Query(..., ge=0)):
+def api_eval(project_id: int, t: str = Query(..., description="非负小数毫秒时刻，如 1.5 或 5/3")):
+    time = parse_time(t)
     with db.transaction() as conn:
         get_project_or_404(conn, project_id)
         items = db.load_items(conn, project_id)
         try:
             view = resolve(items)
-            channels = evaluate(view, t)
+            channels = evaluate(view, time)
         except EngineError as exc:
             raise HTTPException(status_code=400, detail=exc.detail)
         ordered = sorted(channels.values(), key=lambda c: (c["fixture"], c["channel"]))
-        return {"time_ms": t, "channels": ordered}
+        time_ms = time.numerator // time.denominator if time.denominator == 1 \
+            else time.numerator / time.denominator
+        return {"time_ms": time_ms, "channels": ordered}
 
 
 @app.get("/api/health")
