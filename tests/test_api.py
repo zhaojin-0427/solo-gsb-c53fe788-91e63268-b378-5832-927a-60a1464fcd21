@@ -118,6 +118,61 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(ch2["raw"], "3/2")
         self.assertEqual(ch2["value"], 2)
 
+    def test_eval_fractional_time(self):
+        self.client.post(f"{self.base}/items",
+                         json=abs_body(target=10, duration=10))
+        # ?t=1.5 must not be truncated to 1
+        r = self.client.get(f"{self.base}/eval", params={"t": 1.5})
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertEqual(body["time_ms"], 1.5)
+        ch = body["channels"][0]
+        self.assertEqual(ch["raw"], "3/2")
+        self.assertEqual(ch["value"], 2)  # 1.5 rounds half up
+
+    def test_eval_fractional_decimal_string(self):
+        self.client.post(f"{self.base}/items",
+                         json=abs_body(target=100, duration=100))
+        r = self.client.get(f"{self.base}/eval", params={"t": "0.25"})
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertEqual(body["time_ms"], 0.25)
+        self.assertEqual(body["channels"][0]["raw"], "1/4")
+        self.assertEqual(body["channels"][0]["value"], 0)
+
+    def test_eval_integer_time_echoed_as_int(self):
+        self.client.post(f"{self.base}/items", json=abs_body())
+        r = self.client.get(f"{self.base}/eval", params={"t": "5"})
+        self.assertEqual(r.status_code, 200)
+        self.assertIsInstance(r.json()["time_ms"], int)
+        self.assertEqual(r.json()["time_ms"], 5)
+
+    def test_eval_negative_fraction_rejected(self):
+        self.client.post(f"{self.base}/items", json=abs_body())
+        r = self.client.get(f"{self.base}/eval", params={"t": "-0.5"})
+        self.assertEqual(r.status_code, 422)
+
+    def test_eval_non_numeric_rejected(self):
+        self.client.post(f"{self.base}/items", json=abs_body())
+        r = self.client.get(f"{self.base}/eval", params={"t": "abc"})
+        self.assertEqual(r.status_code, 422)
+
+    def test_eval_fraction_matches_direct_engine(self):
+        # readout at a fractional instant equals direct evaluation of the
+        # same instant (interruption + unrounded continuation case)
+        self.client.post(f"{self.base}/items",
+                         json=abs_body(target=3, duration=10))
+        self.client.post(f"{self.base}/items",
+                         json=abs_body(target=103, duration=100, ms=5))
+        for t in ("5", "5.0", "1.5", "50.5", "104.75"):
+            r = self.client.get(f"{self.base}/eval", params={"t": t})
+            self.assertEqual(r.status_code, 200, r.text)
+            ch = r.json()["channels"][0]
+            self.assertEqual(ch["raw"], {
+                "5": "3/2", "5.0": "3/2", "1.5": "9/20",
+                "50.5": "19073/400", "104.75": "82197/800",
+            }[t], t)
+
     def test_field_validation(self):
         r = self.client.post(f"{self.base}/items",
                              json=abs_body(target=256))

@@ -6,18 +6,21 @@ import os
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel
 
 from . import db
 from .engine import (
     EngineError,
+    Fraction,
     Item,
     evaluate,
     referrer_chain,
     resolve,
+    to_time,
 )
 from .schemas import ItemIn, ProjectIn
 from .seed import seed_if_empty
@@ -181,12 +184,40 @@ def _validate_and_payload(conn, project_id: int, focus_id: Optional[int]):
 # --------------------------------------------------------------------------
 
 class EvalResponse(BaseModel):
-    time_ms: int
+    # integral instants serialize as int (e.g. 5), fractional ones as float
+    time_ms: int | float
     channels: list
 
 
+def _eval_time(t: str = Query(..., description="非负毫秒时刻，可为小数，如 1.5")) -> Fraction:
+    """Parse the eval instant exactly; any non-negative decimal accepted.
+
+    ``Fraction`` parses decimal strings exactly (``"1.5"`` -> 3/2) and also
+    accepts rational strings such as ``"3/2"``.  Invalid / negative input
+    becomes a 422, just like the old constrained integer parameter.
+    """
+    try:
+        value = to_time(t)
+    except (ValueError, ZeroDivisionError):
+        raise RequestValidationError([
+            {"type": "value_error",
+             "loc": ("query", "t"),
+             "msg": "t 必须是非负数字（允许小数毫秒）",
+             "input": t}
+        ])
+    if value < 0:
+        raise RequestValidationError([
+            {"type": "greater_than_equal",
+             "loc": ("query", "t"),
+             "msg": "t 不能为负",
+             "input": t,
+             "ctx": {"ge": 0}}
+        ])
+    return value
+
+
 @app.get("/api/projects/{project_id}/eval", response_model=EvalResponse)
-def api_eval(project_id: int, t: int = Query(..., ge=0)):
+def api_eval(project_id: int, t: Fraction = Depends(_eval_time)):
     with db.transaction() as conn:
         get_project_or_404(conn, project_id)
         items = db.load_items(conn, project_id)
@@ -196,7 +227,9 @@ def api_eval(project_id: int, t: int = Query(..., ge=0)):
         except EngineError as exc:
             raise HTTPException(status_code=400, detail=exc.detail)
         ordered = sorted(channels.values(), key=lambda c: (c["fixture"], c["channel"]))
-        return {"time_ms": t, "channels": ordered}
+        # echo the evaluated instant: keep ints as ints, decimals as floats
+        echo: int | float = t.numerator // t.denominator if t.denominator == 1 else float(t)
+        return {"time_ms": echo, "channels": ordered}
 
 
 @app.get("/api/health")

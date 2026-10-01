@@ -56,6 +56,13 @@ function fmtTime(ms) {
   return `${(ms / 1000).toFixed(2)} s`;
 }
 
+// compact numeric text for the jump box; keeps fractional playhead ms
+// (1.5, 16.666666...) without trailing float noise or exponential form
+function timeText(ms) {
+  if (Number.isInteger(ms)) return String(ms);
+  return String(Math.round(ms * 1e6) / 1e6);
+}
+
 function toast(msg) {
   const t = $("#errorToast");
   t.textContent = msg;
@@ -349,7 +356,7 @@ function seekTo(t) {
 
 function updateClockAndHead() {
   $("#clock").textContent = fmtTime(state.time);
-  $("#jumpInput").value = Math.floor(state.time);
+  $("#jumpInput").value = timeText(state.time);
   const svg = document.querySelector("svg.tl");
   if (!svg) return;
   const x = state.labelW + state.headPad +
@@ -366,18 +373,39 @@ function updateClockAndHead() {
 }
 
 async function requestEval(immediate) {
-  const tq = Math.floor(state.time);
-  // identical integer time -> the result would be the same
+  // keep the playhead time verbatim — fractional ms (1.5, 16.666…) must
+  // reach the engine untruncated so the readout matches direct /eval.
+  const tq = state.time;
+  // identical time -> the result would be the same
   if (!immediate && state.lastEvalTime === tq && state.readouts) return;
   // one in-flight request at a time; remember to re-run afterwards
   if (state.evalInflight) {
     state.evalQueued = true;
     return;
   }
-  // during playback, cap request rate to ~12/s; seeks are always immediate
-  const now = performance.now();
-  if (!immediate && now - (state._lastEvalKick || -100) < 80) return;
-  state._lastEvalKick = now;
+  // during playback, cap request rate to ~12/s; seeks/drags are immediate.
+  // a throttled frame arms a trailing kick so the newest playhead position
+  // is still evaluated (also covers pause / end of playback).
+  if (!immediate) {
+    const now = performance.now();
+    const wait = 80 - (now - (state._lastEvalKick || -1e9));
+    if (wait > 0) {
+      if (!state._evalTimer) {
+        state._evalTimer = setTimeout(() => {
+          state._evalTimer = null;
+          requestEval(true);
+        }, wait);
+      }
+      return;
+    }
+    state._lastEvalKick = now;
+  } else {
+    if (state._evalTimer) {
+      clearTimeout(state._evalTimer);
+      state._evalTimer = null;
+    }
+    state._lastEvalKick = performance.now();
+  }
 
   state.evalInflight = true;
   state.lastEvalTime = tq;
@@ -391,6 +419,10 @@ async function requestEval(immediate) {
     state.evalInflight = false;
     if (state.evalQueued) {
       state.evalQueued = false;
+      if (state._evalTimer) {
+        clearTimeout(state._evalTimer);
+        state._evalTimer = null;
+      }
       requestEval(true);
     }
   }
@@ -707,9 +739,9 @@ async function init() {
 
 function doJump() {
   const t = Number($("#jumpInput").value);
-  if (!Number.isFinite(t) || t < 0) { toast("请输入非负整数毫秒"); return; }
+  if (!Number.isFinite(t) || t < 0) { toast("请输入非负毫秒数（可为小数）"); return; }
   setPlaying(false);
-  seekTo(Math.floor(t));
+  seekTo(t);
 }
 
 init().catch((e) => toast(e.message));

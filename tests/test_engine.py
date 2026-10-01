@@ -181,6 +181,72 @@ class TestFades(unittest.TestCase):
         self.assertEqual(evaluate(view, 50)["L1|2"]["value"], 0)
 
 
+class TestFractionalTimes(unittest.TestCase):
+    """Fractional millisecond instants must flow through end to end."""
+
+    def test_fractional_decimal_exact(self):
+        # 0 -> 100 over 10 ms: at 1.5 ms the exact value is 15
+        view = resolve([abs_item(1, target=100, duration=10, ms=0)])
+        out = evaluate(view, "1.5")["A|1"]
+        self.assertEqual(out["raw"], "15")
+        self.assertEqual(out["value"], 15)
+        self.assertEqual(out["active_item_id"], 1)
+
+    def test_fractional_binary_float_exact(self):
+        # binary float 1.5 must be converted exactly, not floored to 1
+        view = resolve([abs_item(1, target=10, duration=10, ms=0)])
+        self.assertEqual(evaluate(view, 1.5)["A|1"]["raw"], "3/2")
+
+    def test_half_up_at_fractional_instant(self):
+        # 0 -> 1 over 10 ms: value at 5 ms is exactly 1/2 -> rounds up to 1
+        view = resolve([abs_item(1, target=1, duration=10, ms=0)])
+        at5 = evaluate(view, "5")["A|1"]
+        self.assertEqual(at5["raw"], "1/2")
+        self.assertEqual(at5["value"], 1)
+        # and the same midpoint reached at a fractional instant
+        view2 = resolve([abs_item(1, target=10, duration=100, ms=0)])
+        at_half = evaluate(view2, "49.5")["A|1"]  # 49.5/100*10 = 4.95 = 99/20
+        self.assertEqual(at_half["raw"], "99/20")
+        self.assertEqual(at_half["value"], 5)
+
+    def test_continue_from_unrounded_value_at_fractional_query(self):
+        # 0->3 over 10 ms interrupted at 5 ms by a fade 3/2 -> 103 over 100 ms
+        view = resolve([
+            abs_item(1, target=3, duration=10, ms=0),
+            abs_item(2, target=103, duration=100, ms=5),
+        ])
+        at5 = evaluate(view, "5")["A|1"]
+        self.assertEqual(at5["raw"], "3/2")
+        self.assertEqual(at5["value"], 2)
+        # fractional query inside the second fade (starts at 5 from 3/2):
+        # 3/2 + (103 - 3/2) * 45.5/100 = 47.6825
+        at505 = evaluate(view, "50.5")["A|1"]
+        self.assertEqual(at505["raw"], "19073/400")
+        self.assertEqual(at505["value"], 48)  # 47.6825
+
+    def test_fractional_query_on_integer_boundary(self):
+        # a fractional t landing exactly on an integer item start is exact
+        view = resolve([
+            abs_item(1, target=100, duration=1000, ms=0),
+            abs_item(2, target=0, duration=100, ms=500),
+        ])
+        self.assertEqual(evaluate(view, "500.0")["A|1"]["raw"], "50")
+        self.assertEqual(evaluate(view, 600.0)["A|1"]["value"], 0)
+
+    def test_integer_times_unchanged(self):
+        # regression: plain ints behave exactly as before
+        view = resolve([abs_item(1, target=100, duration=1000, ms=0)])
+        for t in (0, 250, 500, 750, 1000, 2000):
+            self.assertEqual(evaluate(view, t)["A|1"]["value"],
+                             {0: 0, 250: 25, 500: 50, 750: 75,
+                              1000: 100, 2000: 100}[t])
+
+    def test_negative_fraction_rejected(self):
+        view = resolve([abs_item(1)])
+        with self.assertRaisesRegex(EngineError, "不能为负"):
+            evaluate(view, "-0.5")
+
+
 class TestReferrerChain(unittest.TestCase):
     def test_closure(self):
         items = [

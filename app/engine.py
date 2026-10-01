@@ -11,14 +11,16 @@ plus a non-negative offset.  The engine
   from the *unrounded* value left by the previous fade (a later item can
   interrupt an earlier fade),
 * evaluates the channel values at any non-negative time exactly
-  (``fractions.Fraction``); display values round half up.
+  (``fractions.Fraction``), including fractional millisecond instants
+  (e.g. ``t=1.5``); display values round half up.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 from fractions import Fraction
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 
 class EngineError(Exception):
@@ -45,8 +47,8 @@ class Item:
 
 @dataclass
 class Segment:
-    begin: int  # segment occupies [begin, end) (instant items: begin == end)
-    end: int
+    begin: int  # integer item boundary; segment occupies [begin, end)
+    end: int    # (instant items: begin == end)
     start_value: Fraction
     end_value: Fraction
     instant: bool
@@ -200,7 +202,7 @@ def resolve(items: Iterable[Item]) -> ResolvedView:
     return ResolvedView(items=out, lanes=lanes)
 
 
-def _value_at(segs: List[Segment], t: int, fallback: Fraction) -> Fraction:
+def _value_at(segs: List[Segment], t: Fraction, fallback: Fraction) -> Fraction:
     for seg in reversed(segs):
         if seg.instant:
             if t >= seg.begin:
@@ -220,7 +222,26 @@ def _value_at(segs: List[Segment], t: int, fallback: Fraction) -> Fraction:
 # Evaluation at an arbitrary absolute time
 # --------------------------------------------------------------------------
 
-def eval_lane(segs: List[Segment], t: int) -> Tuple[Fraction, Optional[int]]:
+TimeLike = Union[int, float, Decimal, str, Fraction]
+
+
+def to_time(value: TimeLike) -> Fraction:
+    """Convert an API/query time to an exact :class:`Fraction`.
+
+    Item boundaries stay integer milliseconds, but the evaluated instant
+    may be any non-negative fractional millisecond (e.g. ``1.5``); binary
+    floats and decimal strings are both converted exactly.
+    """
+    if isinstance(value, Fraction):
+        return value
+    if isinstance(value, int):
+        return Fraction(value)
+    if isinstance(value, float):
+        return Fraction(value)
+    return Fraction(value)  # Decimal / str / rational strings ("3/2")
+
+
+def eval_lane(segs: List[Segment], t: Fraction) -> Tuple[Fraction, Optional[int]]:
     """Return (exact value, item id responsible for the value) at time t.
 
     Segments are start-ordered; an interrupted segment can still span t,
@@ -244,7 +265,8 @@ def eval_lane(segs: List[Segment], t: int) -> Tuple[Fraction, Optional[int]]:
     return value, active
 
 
-def evaluate(view: ResolvedView, t: int) -> Dict[str, dict]:
+def evaluate(view: ResolvedView, t: TimeLike) -> Dict[str, dict]:
+    t = to_time(t)
     if t < 0:
         raise EngineError("时间不能为负")
     out: Dict[str, dict] = {}
